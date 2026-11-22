@@ -15,8 +15,8 @@
 #define OFFSET_FASE6 0x195f   // "ucomiss xmm4, DWORD PTR [rsp+0x4c]"
 
 
-#define REG_R15 0              // para elegir de qué registro leer la clave entera
-#define REG_RBX 1
+#define REG_R15_FASE_1 0              // para elegir de qué registro leer la clave entera
+#define REG_RBX_FASE_3 1
 
 
 /* ===================== LEER Y ESCRIBIR MEMORIA ===================== */
@@ -74,7 +74,7 @@ void fase_entera(pid_t pid, int numero, unsigned long direccion, int registro) {
     ptrace(PTRACE_GETREGS, pid, 0, &regs);
 
     int clave;
-    if (registro == REG_R15) clave = regs.r15;
+    if (registro == REG_R15_FASE_1) clave = regs.r15;
     else                     clave = regs.rbx;
     printf("Clave de la fase %d: %d\n", numero, clave);
 
@@ -144,9 +144,9 @@ int main() {
     /* ===== Buscar dónde se cargó la bomba ===== */
 
     char ruta[64];
+    unsigned long base;
     sprintf(ruta, "/proc/%d/maps", pid);
     FILE *archivo = fopen(ruta, "r");
-    unsigned long base;
     fscanf(archivo, "%lx", &base);               // el primer número es la base
     fclose(archivo);
     printf("Base de la bomba: 0x%lx\n", base);
@@ -154,11 +154,11 @@ int main() {
 
     /* ===== Las 6 fases ===== */
 
-    fase_entera(pid, 1, base + OFFSET_FASE1, REG_R15);
+    fase_entera(pid, 1, base + OFFSET_FASE1, REG_R15_FASE_1);
     fase_float (pid, 2, base + OFFSET_FASE2, 3, 0x48);    // xmm3, respuesta en [rsp+0x48]
-    fase_entera(pid, 3, base + OFFSET_FASE3, REG_RBX);
+    fase_entera(pid, 3, base + OFFSET_FASE3, REG_RBX_FASE_3);
     fase_texto (pid, 4, base + OFFSET_FASE4);
-    fase_entera(pid, 5, base + OFFSET_FASE5, REG_RBX);
+    fase_entera(pid, 5, base + OFFSET_FASE5, REG_RBX_FASE_3);
     fase_float (pid, 6, base + OFFSET_FASE6, 4, 0x4c);    // xmm4, respuesta en [rsp+0x4c]
 
 
