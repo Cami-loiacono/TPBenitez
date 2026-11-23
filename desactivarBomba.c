@@ -1,48 +1,42 @@
-#include <stdio.h>        // printf, fopen, fscanf
-#include <stdlib.h>       // exit
-#include <string.h>       // memcpy
-#include <unistd.h>       // fork, execl
-#include <sys/types.h>    // pid_t (número de proceso)
-#include <sys/wait.h>     // waitpid
-#include <sys/ptrace.h>   // ptrace
-#include <sys/user.h>     // struct user_regs_struct y user_fpregs_struct (los registros)
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/ptrace.h>
+#include <sys/user.h>
 
-#define OFFSET_FASE1 0x176e   // "cmp DWORD PTR [rsp+0x44], r15d"
-#define OFFSET_FASE2 0x17c8   // "ucomiss xmm3, DWORD PTR [rsp+0x48]"
-#define OFFSET_FASE3 0x182f   // "cmp DWORD PTR [rsp+0x44], ebx"
-#define OFFSET_FASE4 0x18ae   // "call strcmp"   (rdi = mi respuesta, rsi = la clave)
-#define OFFSET_FASE5 0x1911   // "cmp DWORD PTR [rsp+0x44], ebx"
-#define OFFSET_FASE6 0x195f   // "ucomiss xmm4, DWORD PTR [rsp+0x4c]"
+#define OFFSET_FASE1 0x176e
+#define OFFSET_FASE2 0x17c8
+#define OFFSET_FASE3 0x182f
+#define OFFSET_FASE4 0x18ae
+#define OFFSET_FASE5 0x1911
+#define OFFSET_FASE6 0x195f
 
+#define FASE_1 1
+#define FASE_3 3
+#define FASE_5 5
 
-#define REG_R15_FASE_1 0              // para elegir de qué registro leer la clave entera
-#define REG_RBX_FASE_3 1
-
-
-/* ===================== LEER Y ESCRIBIR MEMORIA ===================== */
-
-/* Lee 8 bytes de la memoria de la bomba */
 long leer_8_bytes(pid_t pid, unsigned long direccion) {
-    return ptrace(PTRACE_PEEKDATA, pid, (void *)direccion, 0);
+    return ptrace(PTRACE_PEEKDATA, pid, direccion, 0);
 }
 
-/* Escribe 8 bytes en la memoria de la bomba */
 void escribir_8_bytes(pid_t pid, unsigned long direccion, long valor) {
-    ptrace(PTRACE_POKEDATA, pid, (void *)direccion, (void *)valor);
+    ptrace(PTRACE_POKEDATA, pid, direccion, valor);
 }
 
-/* Escribe 4 bytes (un int o un float) sin tocar los 4 bytes de al lado */
-void escribir_4_bytes(pid_t pid, unsigned long direccion, unsigned char nuevos[4]) {
+void escribir_4_bytes(pid_t pid, unsigned long direccion, void *nuevos) {
     long dato = leer_8_bytes(pid, direccion);
-    memcpy(&dato, nuevos, 4);        // piso solo los primeros 4 bytes
+    memcpy(&dato, nuevos, 4);
     escribir_8_bytes(pid, direccion, dato);
 }
 
 long poner_breakpoint(pid_t pid, unsigned long direccion) {
     long original = leer_8_bytes(pid, direccion);
     unsigned char bytes[8];
-    memcpy(bytes, &original, 8);     // paso los 8 bytes a un arreglo
-    bytes[0] = 0xCC;                 // cambio el primero por 0xCC (int3)
+    memcpy(bytes, &original, 8);
+    bytes[0] = 0xCC;
     long con_breakpoint;
     memcpy(&con_breakpoint, bytes, 8);
     escribir_8_bytes(pid, direccion, con_breakpoint);
@@ -55,114 +49,91 @@ void continuar_y_esperar(pid_t pid) {
 }
 
 void sacar_breakpoint(pid_t pid, unsigned long direccion, long original) {
-    escribir_8_bytes(pid, direccion, original);   // vuelvo a poner los bytes originales
     struct user_regs_struct regs;
+    escribir_8_bytes(pid, direccion, original);
     ptrace(PTRACE_GETREGS, pid, 0, &regs);
-    regs.rip = direccion;            // el int3 adelantó rip 1 byte: lo vuelvo atrás
+    regs.rip = direccion;
     ptrace(PTRACE_SETREGS, pid, 0, &regs);
 }
 
-
-/* ============================ LAS FASES ============================ */
-
-/* Fase con clave ENTERA: la clave está en r15d o en ebx, la respuesta en [rsp+0x44] */
-void fase_entera(pid_t pid, int numero, unsigned long direccion, int registro) {
-    long original = poner_breakpoint(pid, direccion);
-    continuar_y_esperar(pid);                     // la bomba pide la clave y frena en el cmp
-
+void fase_entera(pid_t pid, unsigned long direccion, int fase_actual) {
     struct user_regs_struct regs;
+    int clave;
+    long original = poner_breakpoint(pid, direccion);
+    continuar_y_esperar(pid);
     ptrace(PTRACE_GETREGS, pid, 0, &regs);
 
-    int clave;
-    if (registro == REG_R15_FASE_1) clave = regs.r15;
-    else                     clave = regs.rbx;
-    printf("Clave de la fase %d: %d\n", numero, clave);
+    if (fase_actual == FASE_1){
+        clave = regs.r15;
+    } else {
+        clave = regs.rbx;
+    }
 
-    escribir_4_bytes(pid, regs.rsp + 0x44, (unsigned char *)&clave);
+    printf("Clave de la fase %d: %d\n", fase_actual, clave);
+    escribir_4_bytes(pid, regs.rsp + 0x44, &clave);
     sacar_breakpoint(pid, direccion, original);
 }
 
-/* Fase con clave FLOAT: la clave está en xmm3 o xmm4, la respuesta en [rsp + desplazamiento] */
 void fase_float(pid_t pid, int numero, unsigned long direccion, int numero_xmm, int desplazamiento) {
-    long original = poner_breakpoint(pid, direccion);
-    continuar_y_esperar(pid);                     // la bomba pide la clave y frena en el ucomiss
-
     struct user_fpregs_struct fpregs;
+    float clave;
+    struct user_regs_struct regs;
+    long original = poner_breakpoint(pid, direccion);
+    continuar_y_esperar(pid);
     ptrace(PTRACE_GETFPREGS, pid, 0, &fpregs);
 
-    float clave;
-    memcpy(&clave, &fpregs.xmm_space[numero_xmm * 4], 4);   // cada xmm ocupa 4 posiciones
+    memcpy(&clave, &fpregs.xmm_space[numero_xmm * 4], 4);
     printf("Clave de la fase %d: %f\n", numero, clave);
 
-    struct user_regs_struct regs;
-    ptrace(PTRACE_GETREGS, pid, 0, &regs);        // necesito rsp
-    escribir_4_bytes(pid, regs.rsp + desplazamiento, (unsigned char *)&clave);
+    ptrace(PTRACE_GETREGS, pid, 0, &regs);
+    escribir_4_bytes(pid, regs.rsp + desplazamiento, &clave);
     sacar_breakpoint(pid, direccion, original);
 }
 
-/* Fase con clave de TEXTO: frena en el call strcmp; rsi apunta a la clave, rdi a mi respuesta */
 void fase_texto(pid_t pid, int numero, unsigned long direccion) {
-    long original = poner_breakpoint(pid, direccion);
-    continuar_y_esperar(pid);                     // la bomba pide el texto y frena en el call strcmp
-
     struct user_regs_struct regs;
+    char clave[16];
+    long original = poner_breakpoint(pid, direccion);
+    continuar_y_esperar(pid);
+
     ptrace(PTRACE_GETREGS, pid, 0, &regs);
 
-    long parte1 = leer_8_bytes(pid, regs.rsi);        // clave: bytes 0 a 7
-    long parte2 = leer_8_bytes(pid, regs.rsi + 8);    // clave: bytes 8 a 15 (incluye el '\0')
+    long parte1 = leer_8_bytes(pid, regs.rsi);
+    long parte2 = leer_8_bytes(pid, regs.rsi + 8);
 
-    char clave[17];
     memcpy(clave, &parte1, 8);
     memcpy(clave + 8, &parte2, 8);
-    clave[16] = '\0';
+
     printf("Clave de la fase %d: %s\n", numero, clave);
 
-    escribir_8_bytes(pid, regs.rdi, parte1);          // copio la clave sobre mi respuesta
+    escribir_8_bytes(pid, regs.rdi, parte1);
     escribir_8_bytes(pid, regs.rdi + 8, parte2);
     sacar_breakpoint(pid, direccion, original);
 }
 
-
-/* ============================== MAIN ============================== */
-
 int main() {
-
-    /* ===== Crear la bomba como proceso hijo ===== */
-
     pid_t pid = fork();
 
-    if (pid == 0) {                              // HIJO
-        ptrace(PTRACE_TRACEME, 0, 0, 0);         // "quiero que mi padre me controle"
-        execl("./Bomba", "Bomba", NULL);         // el hijo se convierte en la bomba
-        printf("No se pudo ejecutar ./Bomba\n");
-        exit(1);
+    if (pid == 0) {
+        ptrace(PTRACE_TRACEME, 0, 0, 0);
+        execl("./Bomba", "Bomba", NULL);
     }
 
-    waitpid(pid, NULL, 0);                       // PADRE: espero a que la bomba quede frenada
-
-
-    /* ===== Buscar dónde se cargó la bomba ===== */
+    waitpid(pid, NULL, 0);
 
     char ruta[64];
     unsigned long base;
     sprintf(ruta, "/proc/%d/maps", pid);
     FILE *archivo = fopen(ruta, "r");
-    fscanf(archivo, "%lx", &base);               // el primer número es la base
+    fscanf(archivo, "%lx", &base);
     fclose(archivo);
-    printf("Base de la bomba: 0x%lx\n", base);
 
-
-    /* ===== Las 6 fases ===== */
-
-    fase_entera(pid, 1, base + OFFSET_FASE1, REG_R15_FASE_1);
-    fase_float (pid, 2, base + OFFSET_FASE2, 3, 0x48);    // xmm3, respuesta en [rsp+0x48]
-    fase_entera(pid, 3, base + OFFSET_FASE3, REG_RBX_FASE_3);
-    fase_texto (pid, 4, base + OFFSET_FASE4);
-    fase_entera(pid, 5, base + OFFSET_FASE5, REG_RBX_FASE_3);
-    fase_float (pid, 6, base + OFFSET_FASE6, 4, 0x4c);    // xmm4, respuesta en [rsp+0x4c]
-
-
-    /* ===== Dejar que la bomba termine ===== */
+    fase_entera(pid, base + OFFSET_FASE1, FASE_1);
+    fase_float(pid, 2, base + OFFSET_FASE2, 3, 0x48);
+    fase_entera(pid, base + OFFSET_FASE3, FASE_3);
+    fase_texto(pid, 4, base + OFFSET_FASE4);
+    fase_entera(pid, base + OFFSET_FASE5, FASE_5);
+    fase_float(pid, 6, base + OFFSET_FASE6, 4, 0x4c);
 
     continuar_y_esperar(pid);
     return 0;
